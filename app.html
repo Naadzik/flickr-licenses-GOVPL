@@ -202,12 +202,31 @@ function cmpDN(profile) {
   return cmpGetDisplayName(profile.filename) || profile.username;
 }
 
+// ── Auto-tags (computed from profile data, not editable) ──
+// Profile must have lastYear populated from index.json
+function cmpGetAutoTags(profile) {
+  const tags = [];
+  const lastYear = profile.lastYear || null;
+  if (lastYear >= '2026') tags.push('Aktywne konta');
+  if (lastYear === '2023') tags.push('Nieaktywne od 2023');
+  return tags;
+}
+const CMP_AUTO_TAG_NAMES = new Set(['Aktywne konta', 'Nieaktywne od 2023']);
+
 // ── Tags / groups (localStorage, keyed by filename) ──
 function cmpGetTagsData() {
   try { return JSON.parse(localStorage.getItem('fls-tags') || '{}'); } catch { return {}; }
 }
 function cmpGetTags(filename) {
   return cmpGetTagsData()[filename] || [];
+}
+// Returns user tags + auto-tags for a profile object
+function cmpGetAllTagsForProfile(profile) {
+  const user = cmpGetTags(profile.filename);
+  const auto = cmpGetAutoTags(profile);
+  // merge, preserving order: auto first, then user-only
+  const seen = new Set(auto);
+  return [...auto, ...user.filter(t => !seen.has(t))];
 }
 function cmpSetTags(filename, tags) {
   const m = cmpGetTagsData();
@@ -216,10 +235,17 @@ function cmpSetTags(filename, tags) {
   try { localStorage.setItem('fls-tags', JSON.stringify(m)); } catch {}
 }
 function cmpGetAllTags() {
+  // user-defined tags
   const data = cmpGetTagsData();
   const set = new Set();
   for (const tags of Object.values(data)) tags.forEach(t => set.add(t));
-  return [...set].sort((a, b) => a.localeCompare(b, 'pl'));
+  // auto-tags present in current profiles
+  for (const p of cmpProfiles) cmpGetAutoTags(p).forEach(t => set.add(t));
+  // sort: auto-tags first (in definition order), then user tags alphabetically
+  const autoOrder = ['Aktywne konta', 'Nieaktywne od 2023'];
+  const autoPresent = autoOrder.filter(t => set.has(t));
+  const userOnly = [...set].filter(t => !CMP_AUTO_TAG_NAMES.has(t)).sort((a, b) => a.localeCompare(b, 'pl'));
+  return [...autoPresent, ...userOnly];
 }
 function cmpAddTag(filename, tag) {
   const t = tag.trim(); if (!t) return;
@@ -374,12 +400,22 @@ function cmpRenderTagBar() {
   }
 
   for (const tag of allTags) {
-    const count = cmpProfiles.filter(p => cmpGetTags(p.filename).includes(tag)).length;
-    bar.appendChild(mkFilterBtn(tag, tag, count));
+    const isAuto = CMP_AUTO_TAG_NAMES.has(tag);
+    const count = cmpProfiles.filter(p => cmpGetAllTagsForProfile(p).includes(tag)).length;
+    const btn = mkFilterBtn(tag, tag, count);
+    if (isAuto) {
+      // subtle lock indicator for auto-tags
+      btn.title = 'Tag automatyczny (na podstawie danych)';
+      const icon = document.createElement('span');
+      icon.textContent = ' 🔒';
+      icon.style.cssText = 'font-size:.65rem;opacity:.5';
+      btn.appendChild(icon);
+    }
+    bar.appendChild(btn);
   }
 
-  if (cmpProfiles.some(p => !cmpGetTags(p.filename).length)) {
-    const count = cmpProfiles.filter(p => !cmpGetTags(p.filename).length).length;
+  if (cmpProfiles.some(p => !cmpGetAllTagsForProfile(p).length)) {
+    const count = cmpProfiles.filter(p => !cmpGetAllTagsForProfile(p).length).length;
     bar.appendChild(mkFilterBtn('Bez tagu', '__untagged__', count));
   }
 }
@@ -402,9 +438,9 @@ function cmpRenderProfileList() {
   // Apply tag filter
   let visibleProfiles = cmpProfiles;
   if (cmpActiveTagFilter === '__untagged__') {
-    visibleProfiles = cmpProfiles.filter(p => !cmpGetTags(p.filename).length);
+    visibleProfiles = cmpProfiles.filter(p => !cmpGetAllTagsForProfile(p).length);
   } else if (cmpActiveTagFilter) {
-    visibleProfiles = cmpProfiles.filter(p => cmpGetTags(p.filename).includes(cmpActiveTagFilter));
+    visibleProfiles = cmpProfiles.filter(p => cmpGetAllTagsForProfile(p).includes(cmpActiveTagFilter));
   }
 
   // Split empty (0 photos) from non-empty
@@ -553,22 +589,29 @@ function cmpRenderProfileList() {
 
     function renderTagChips() {
       tagsWrap.innerHTML = '';
-      const tags = cmpGetTags(p.filename);
-      tags.forEach(tag => {
+      const allProfileTags = cmpGetAllTagsForProfile(p);
+      allProfileTags.forEach(tag => {
+        const isAuto = CMP_AUTO_TAG_NAMES.has(tag);
         const chip = document.createElement('span');
-        chip.style.cssText = 'display:inline-flex;align-items:center;gap:.2rem;background:#0f3460;' +
-          'color:#a0c4ff;border:1px solid #1a4a8a;border-radius:100px;padding:.08rem .4rem;' +
-          'font-size:.7rem;cursor:default;transition:border-color .15s';
+        chip.style.cssText = 'display:inline-flex;align-items:center;gap:.2rem;' +
+          (isAuto
+            ? 'background:#0a2a10;color:#5cb85c;border:1px solid #1a5c1a;'
+            : 'background:#0f3460;color:#a0c4ff;border:1px solid #1a4a8a;') +
+          'border-radius:100px;padding:.08rem .4rem;font-size:.7rem;cursor:default;transition:border-color .15s';
         chip.textContent = tag;
-        const rmBtn = document.createElement('button');
-        rmBtn.textContent = '×';
-        rmBtn.style.cssText = 'background:none;border:none;color:#555;cursor:pointer;padding:0;' +
-          'font-size:.8rem;line-height:1;transition:color .1s;margin-left:.05rem;flex-shrink:0';
-        rmBtn.title = `Usuń tag "${tag}"`;
-        rmBtn.addEventListener('mouseenter', () => rmBtn.style.color = '#e74c3c');
-        rmBtn.addEventListener('mouseleave', () => rmBtn.style.color = '#555');
-        rmBtn.addEventListener('click', e => { e.stopPropagation(); cmpRemoveTag(p.filename, tag); renderTagChips(); cmpRenderTagBar(); });
-        chip.appendChild(rmBtn);
+        if (isAuto) {
+          chip.title = 'Tag automatyczny (na podstawie danych)';
+        } else {
+          const rmBtn = document.createElement('button');
+          rmBtn.textContent = '×';
+          rmBtn.style.cssText = 'background:none;border:none;color:#555;cursor:pointer;padding:0;' +
+            'font-size:.8rem;line-height:1;transition:color .1s;margin-left:.05rem;flex-shrink:0';
+          rmBtn.title = `Usuń tag "${tag}"`;
+          rmBtn.addEventListener('mouseenter', () => rmBtn.style.color = '#e74c3c');
+          rmBtn.addEventListener('mouseleave', () => rmBtn.style.color = '#555');
+          rmBtn.addEventListener('click', e => { e.stopPropagation(); cmpRemoveTag(p.filename, tag); renderTagChips(); cmpRenderTagBar(); });
+          chip.appendChild(rmBtn);
+        }
         tagsWrap.appendChild(chip);
       });
       tagsWrap.appendChild(addTagBtn);
@@ -586,7 +629,7 @@ function cmpRenderProfileList() {
       // Remove any existing popovers
       document.querySelectorAll('.fls-tag-popover').forEach(el => el.remove());
 
-      const existingTags = cmpGetAllTags().filter(t => !cmpGetTags(p.filename).includes(t));
+      const existingTags = cmpGetAllTags().filter(t => !CMP_AUTO_TAG_NAMES.has(t) && !cmpGetTags(p.filename).includes(t));
       const pop = document.createElement('div');
       pop.className = 'fls-tag-popover';
       pop.style.cssText = 'position:absolute;z-index:10000;background:#0d2137;border:1px solid #1a4a8a;' +
@@ -1001,15 +1044,6 @@ function cmpShowProfileStats(profile) {
   filterLbl.style.cssText = 'font-size:.7rem;color:#a0c4ff;font-weight:600;white-space:nowrap;flex-shrink:0';
   filterLbl.textContent = 'Zakres dat:';
 
-  const iStyle = 'background:#0a1525;border:1px solid #1a4a8a;border-radius:5px;color:#ccc;' +
-    'font-size:.72rem;padding:.2rem .45rem;cursor:pointer;outline:none';
-  const fromIn = document.createElement('input');
-  fromIn.type = 'date'; fromIn.style.cssText = iStyle;
-  const dashSp = document.createElement('span');
-  dashSp.textContent = '–'; dashSp.style.cssText = 'color:#444;flex-shrink:0';
-  const toIn = document.createElement('input');
-  toIn.type = 'date'; toIn.style.cssText = iStyle;
-
   const yrBtns = document.createElement('div');
   yrBtns.style.cssText = 'display:flex;flex-wrap:wrap;gap:.2rem;align-items:center';
   allYears.forEach(yr => {
@@ -1019,9 +1053,14 @@ function cmpShowProfileStats(profile) {
     btn.style.cssText = 'font-size:.68rem;padding:.15rem .4rem;border-radius:4px;border:1px solid #1a4a8a;' +
       'background:#0a1525;color:#555;cursor:pointer;transition:background .1s,color .1s;white-space:nowrap';
     btn.addEventListener('click', () => {
-      const yF = yr+'-01-01', yT = yr+'-12-31';
-      if (filterFrom===yF && filterTo===yT) { filterFrom=''; filterTo=''; }
-      else { filterFrom=yF; filterTo=yT; }
+      if (!filterFrom && !filterTo) {
+        filterFrom = yr; filterTo = yr;
+      } else if (filterFrom === yr && filterTo === yr) {
+        filterFrom = ''; filterTo = '';
+      } else {
+        if (!filterFrom || yr < filterFrom) filterFrom = yr;
+        if (!filterTo   || yr > filterTo)   filterTo   = yr;
+      }
       syncFUI(); rebuildContent();
     });
     yrBtns.appendChild(btn);
@@ -1032,20 +1071,19 @@ function cmpShowProfileStats(profile) {
   resetFBtn.style.cssText = 'font-size:.7rem;color:#555;background:none;border:none;cursor:pointer;' +
     'text-decoration:underline;transition:color .1s;white-space:nowrap;flex-shrink:0;display:none';
   resetFBtn.addEventListener('click', () => { filterFrom=''; filterTo=''; syncFUI(); rebuildContent(); });
-  fromIn.addEventListener('change', () => { filterFrom=fromIn.value||''; syncFUI(); rebuildContent(); });
-  toIn.addEventListener('change',   () => { filterTo=toIn.value||'';     syncFUI(); rebuildContent(); });
 
   function syncFUI() {
-    fromIn.value = filterFrom; toIn.value = filterTo;
     resetFBtn.style.display = (filterFrom||filterTo) ? '' : 'none';
     yrBtns.querySelectorAll('button[data-year]').forEach(b => {
-      const active = filterFrom===b.dataset.year+'-01-01' && filterTo===b.dataset.year+'-12-31';
+      const y = b.dataset.year;
+      const active = filterFrom && filterTo ? (y >= filterFrom && y <= filterTo) :
+                     filterFrom ? y === filterFrom : filterTo ? y === filterTo : false;
       b.style.background = active ? '#1a4a8a' : '#0a1525';
       b.style.color      = active ? '#a0c4ff' : '#555';
     });
   }
 
-  filterBar.append(filterLbl, fromIn, dashSp, toIn, yrBtns, resetFBtn);
+  filterBar.append(filterLbl, yrBtns, resetFBtn);
   panel.appendChild(filterBar);
 
   // ── Content placeholder (rebuilt on filter change) ──
@@ -1414,18 +1452,6 @@ function cmpRenderResults(selected, staleDiff, newest, oldest) {
   filterLbl.style.cssText = 'font-size:.72rem;color:#a0c4ff;font-weight:600;white-space:nowrap;flex-shrink:0';
   filterLbl.textContent = 'Zakres dat:';
 
-  const inputStyle = 'background:#0a1525;border:1px solid #1a4a8a;border-radius:5px;color:#ccc;' +
-    'font-size:.72rem;padding:.2rem .45rem;cursor:pointer;outline:none;';
-
-  const fromInput = document.createElement('input');
-  fromInput.type = 'date'; fromInput.style.cssText = inputStyle; fromInput.title = 'Od daty';
-
-  const dashSpan = document.createElement('span');
-  dashSpan.textContent = '–'; dashSpan.style.cssText = 'color:#444;font-size:.8rem;flex-shrink:0';
-
-  const toInput = document.createElement('input');
-  toInput.type = 'date'; toInput.style.cssText = inputStyle; toInput.title = 'Do daty';
-
   const yearBtns = document.createElement('div');
   yearBtns.style.cssText = 'display:flex;flex-wrap:wrap;gap:.25rem;align-items:center';
   for (const yr of allYears) {
@@ -1437,9 +1463,14 @@ function cmpRenderResults(selected, staleDiff, newest, oldest) {
     btn.addEventListener('mouseenter', () => { if (btn.style.background !== 'rgb(26, 74, 138)') btn.style.color = '#a0c4ff'; });
     btn.addEventListener('mouseleave', () => { if (btn.style.background !== 'rgb(26, 74, 138)') btn.style.color = '#555'; });
     btn.addEventListener('click', () => {
-      const yrFrom = yr + '-01-01', yrTo = yr + '-12-31';
-      if (filterFrom === yrFrom && filterTo === yrTo) { filterFrom = ''; filterTo = ''; }
-      else { filterFrom = yrFrom; filterTo = yrTo; }
+      if (!filterFrom && !filterTo) {
+        filterFrom = yr; filterTo = yr;
+      } else if (filterFrom === yr && filterTo === yr) {
+        filterFrom = ''; filterTo = '';
+      } else {
+        if (!filterFrom || yr < filterFrom) filterFrom = yr;
+        if (!filterTo   || yr > filterTo)   filterTo   = yr;
+      }
       showEmpty = false; updateFilterUI(); rebuildVisuals();
     });
     yearBtns.appendChild(btn);
@@ -1453,19 +1484,15 @@ function cmpRenderResults(selected, staleDiff, newest, oldest) {
   resetBtn.addEventListener('mouseleave', () => resetBtn.style.color = '#555');
   resetBtn.addEventListener('click', () => { filterFrom = ''; filterTo = ''; showEmpty = false; updateFilterUI(); rebuildVisuals(); });
 
-  fromInput.addEventListener('change', () => { filterFrom = fromInput.value || ''; showEmpty = false; updateFilterUI(); rebuildVisuals(); });
-  toInput.addEventListener('change',   () => { filterTo   = toInput.value   || ''; showEmpty = false; updateFilterUI(); rebuildVisuals(); });
-
-  filterBar.append(filterLbl, fromInput, dashSpan, toInput, yearBtns, resetBtn);
+  filterBar.append(filterLbl, yearBtns, resetBtn);
   results.appendChild(filterBar);
 
   function updateFilterUI() {
-    fromInput.value = filterFrom;
-    toInput.value   = filterTo;
     resetBtn.style.display = (filterFrom || filterTo) ? '' : 'none';
     yearBtns.querySelectorAll('button[data-year]').forEach(btn => {
-      const yr = btn.dataset.year;
-      const isActive = filterFrom === yr + '-01-01' && filterTo === yr + '-12-31';
+      const y = btn.dataset.year;
+      const isActive = filterFrom && filterTo ? (y >= filterFrom && y <= filterTo) :
+                       filterFrom ? y === filterFrom : filterTo ? y === filterTo : false;
       btn.style.background = isActive ? '#1a4a8a' : '#0a1525';
       btn.style.color      = isActive ? '#a0c4ff' : '#555';
     });
